@@ -5,6 +5,7 @@ import (
   "os"
   "time"
   "io/ioutil"
+  "math/bits"
   "math/rand"
   sdl "github.com/veandco/go-sdl2/sdl"
 )
@@ -16,8 +17,8 @@ type chip8 struct {
   pc uint16 // program counter
   sp uint8 // stack pointer
   stack [16]uint16
-  display [32][64]uint8 // 64x32 pixel black and white display 
-  keypad [16]uint8 // one input for eeach hex digit
+  display [32][64]bool // 64x32 pixel black and white display
+  keypad uint16 // one input for eeach hex digit
   delay_timer uint8
   sound_timer uint8
 }
@@ -62,7 +63,8 @@ func updateDisplay(canvas *sdl.Renderer, chip chip8, scale int32) {
   // 0, 0 is top left
   for y, row := range chip.display {
     for x, pixel := range row {
-      canvas.SetDrawColor(pixel * 255, pixel * 255, pixel * 255, 255)
+      p := uint8(sdl.Btoi(pixel))
+      canvas.SetDrawColor(p * 255, p * 255, p * 255, 255)
       canvas.FillRect(&sdl.Rect{X: int32(x) * scale, Y: int32(y) * scale, W: scale, H: scale})
     }
   }
@@ -70,10 +72,11 @@ func updateDisplay(canvas *sdl.Renderer, chip chip8, scale int32) {
 }
 
 func updateKeypad(chip *chip8) {
+  chip.keypad = 0
   ks := sdl.GetKeyboardState()
   for i := 0; i <= 0xF; i++ {
     s := sdl.GetScancodeFromName(fmt.Sprintf("%x", i))
-    chip.keypad[i] = ks[s]
+    chip.keypad |= uint16(ks[s]) << i
   }
 }
 
@@ -91,7 +94,7 @@ func step(chip *chip8, inc_timer bool) bool {
     if opcode == 0xE0 { // clear display
       for y, row := range chip.display {
         for x, _ := range row {
-          chip.display[y][x] = 0
+          chip.display[y][x] = false
         }
       }
     } else if opcode == 0xEE { // return from subroutine
@@ -131,25 +134,16 @@ func step(chip *chip8, inc_timer bool) bool {
     case 0x3:
       chip.reg[X] ^= chip.reg[Y]
     case 0x4:
-      chip.reg[0xF] = 0
-      if uint16(chip.reg[X]) + uint16(chip.reg[Y]) > 0xFF {
-        chip.reg[0xF] = 1
-      }
+      chip.reg[0xF] = uint8(sdl.Btoi(uint16(chip.reg[X]) + uint16(chip.reg[Y]) > 0xFF))
       chip.reg[X] += chip.reg[Y]
     case 0x5:
-      chip.reg[0xF] = 0
-      if chip.reg[X] > chip.reg[Y] {
-        chip.reg[0xF] = 1
-      }
+      chip.reg[0xF] = uint8(sdl.Btoi(chip.reg[X] > chip.reg[Y]))
       chip.reg[X] -= chip.reg[Y]
     case 0x6:
       chip.reg[0xF] = chip.reg[X] & 0x1
       chip.reg[X] >>= 1
     case 0x7:
-      chip.reg[0xF] = 0
-      if chip.reg[Y] > chip.reg[X] {
-        chip.reg[0xF] = 1
-      }
+      chip.reg[0xF] = uint8(sdl.Btoi(chip.reg[Y] > chip.reg[X]))
       chip.reg[X] = chip.reg[Y] - chip.reg[X]
     case 0xE:
       chip.reg[0xF] = chip.reg[X] >> 7
@@ -168,21 +162,20 @@ func step(chip *chip8, inc_timer bool) bool {
   case 0xD:
     // draw a sprite
     chip.reg[0xF] = 0
-    x_min := int(chip.reg[X])
-    y_min := int(chip.reg[Y])
+    x_min, y_min := int(chip.reg[X]), int(chip.reg[Y])
     for y := y_min; y < y_min + int(opcode & 0xF); y++ {
       s := chip.memory[int(chip.index_reg) + (y - y_min)]
       for i := 0; i < 8; i++ {
-        dp := chip.display[y % 32][(x_min + i) % 64]
-        chip.display[y % 32][(x_min + i) % 64] ^= (s >> uint8(7 - i)) & 0x1
-        if dp == 1 && chip.display[y % 32][(x_min + i) % 64] == 0 {
-          chip.reg[0xF] = 1
-        }
+        pixel := &chip.display[y % 32][(x_min + i) % 64]
+        pixel_prev := *pixel
+        *pixel = *pixel != (((s >> uint8(7 - i)) & 0x1) != 0)
+        chip.reg[0xF] |= uint8(sdl.Btoi(!(*pixel) && pixel_prev))
       }
     }
   case 0xE:
-    if (opcode & 0xFF == 0x9E  && chip.keypad[chip.reg[X]] != 0) ||
-        (opcode & 0xFF == 0xA1  && chip.keypad[chip.reg[X]] != 0) {
+    key := (chip.keypad >> uint16(chip.reg[X])) & 0x1
+    if (opcode & 0xFF == 0x9E  && key != 0) ||
+        (opcode & 0xFF == 0xA1  && key != 0) {
       chip.pc += 2
     }
   case 0xF:
@@ -191,12 +184,9 @@ func step(chip *chip8, inc_timer bool) bool {
       chip.reg[X] = chip.delay_timer
     case 0x0A:
       chip.pc -= 2
-      for i, n := range chip.keypad {
-        if n != 0 {
-          chip.reg[X] = uint8(i)
-          chip.pc += 2
-          break
-        }
+      if bits.OnesCount16(chip.keypad) > 0 {
+        chip.reg[X] = uint8(bits.Len16(chip.keypad) - 1)
+        chip.pc += 2
       }
     case 0x15:
       chip.delay_timer = chip.reg[X]
@@ -247,10 +237,8 @@ func main() {
   sdl.Init(sdl.INIT_EVERYTHING)
   defer sdl.Quit()
 
-  window, _ := sdl.CreateWindow("chip8", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, 64*display_scale, 32* display_scale, sdl.WINDOW_SHOWN)
+  window, canvas, _ := sdl.CreateWindowAndRenderer(64*display_scale, 32*display_scale, sdl.WINDOW_SHOWN)
   defer window.Destroy()
-
-  canvas, _ := sdl.CreateRenderer(window, -1, 0)
   defer canvas.Destroy()
 
   rom := "roms/maze.ch8"
