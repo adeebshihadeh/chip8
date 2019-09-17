@@ -3,7 +3,6 @@ package main
 import (
   "fmt"
   "os"
-  "time"
   "io/ioutil"
   "math/bits"
   "math/rand"
@@ -174,8 +173,7 @@ func step(chip *chip8, inc_timer bool) bool {
     }
   case 0xE:
     key := (chip.keypad >> uint16(chip.reg[X])) & 0x1
-    if (opcode & 0xFF == 0x9E  && key != 0) ||
-        (opcode & 0xFF == 0xA1  && key != 0) {
+    if (opcode & 0xFF == 0x9E && key != 0) || (opcode & 0xFF == 0xA1 && key != 0) {
       chip.pc += 2
     }
   case 0xF:
@@ -228,16 +226,15 @@ func step(chip *chip8, inc_timer bool) bool {
 }
 
 func main() {
-  fmt.Println("chip8 emulator written in go!")
-
-  const cpu_freq uint16 = 500
+  const cpu_freq uint32 = 500
   const display_scale int32 = 10
 
   // init graphics
   sdl.Init(sdl.INIT_EVERYTHING)
-  defer sdl.Quit()
-
   window, canvas, _ := sdl.CreateWindowAndRenderer(64*display_scale, 32*display_scale, sdl.WINDOW_SHOWN)
+  window.SetTitle("chip8")
+
+  defer sdl.Quit()
   defer window.Destroy()
   defer canvas.Destroy()
 
@@ -251,7 +248,7 @@ func main() {
   // main emulation loop
   inc_timer := cpu_freq / 60
   for {
-    st := time.Now()
+    st := sdl.GetTicks()
 
     sdl.PollEvent()
     updateKeypad(&chip)
@@ -265,9 +262,9 @@ func main() {
       // TODO: play sound
     }
 
-    // TODO: make sure it doesn't lag
-    sleep := time.Until(st.Add(1000000000/time.Duration(cpu_freq)))
-    time.Sleep(sleep)
+    if sdl.GetTicks() - st < 1000 / cpu_freq {
+      sdl.Delay((1000 / cpu_freq) - (sdl.GetTicks() - st))
+    }
 
     if inc_timer == 0 {
       inc_timer = cpu_freq / 60
